@@ -1,14 +1,15 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Text;
-using System.Text.Json;
+﻿
+using System;
 using System.IO;
+using System.Text.Json;
 
 namespace Neurony
 {
-    class NeuralNetwork
+    public class NeuralNetwork
     {
-        public Layer[] Layers;
+        public Layer[] Layers = Array.Empty<Layer>();
+
+        public NeuralNetwork() { }
 
         public NeuralNetwork(int[] layerSizes)
         {
@@ -16,11 +17,11 @@ namespace Neurony
 
             for (int i = 0; i < Layers.Length; i++)
             {
-                int inputCount = layerSizes[i];
-                int neuronCount = layerSizes[i + 1];
-                bool isOutput = (i == Layers.Length - 1);
-
-                Layers[i] = new Layer(inputCount, neuronCount, isOutput);
+                Layers[i] = new Layer(
+                    layerSizes[i],
+                    layerSizes[i + 1],
+                    i == Layers.Length - 1
+                );
             }
         }
 
@@ -28,16 +29,20 @@ namespace Neurony
         {
             double[] outputs = inputs;
 
-            for (int i = 0; i < Layers.Length; i++)
-            {
-                outputs = Layers[i].Predict(outputs);
-            }
+            foreach (Layer layer in Layers)
+                outputs = layer.Predict(outputs);
 
             return outputs;
         }
 
         public void Train(double[] inputs, double[] targets)
         {
+            if (inputs.Length != Layers[0].Neurons[0].Weights.Length)
+                throw new ArgumentException("Input size does not match network.");
+
+            if (targets.Length != Layers[^1].Neurons.Length)
+                throw new ArgumentException("Target size does not match network.");
+
             double[][] layerInputs = new double[Layers.Length][];
             double[] currentInput = inputs;
 
@@ -47,37 +52,53 @@ namespace Neurony
                 currentInput = Layers[i].Predict(currentInput);
             }
 
-            Layer outputLayer = Layers[Layers.Length - 1];
-            outputLayer.CalculateOutputGradients(targets);
+            Layers[^1].CalculateOutputGradients(targets);
 
             for (int i = Layers.Length - 2; i >= 0; i--)
-            {
                 Layers[i].CalculateHiddenGradients(Layers[i + 1]);
-            }
 
             for (int i = 0; i < Layers.Length; i++)
-            {
                 Layers[i].UpdateWeights(layerInputs[i]);
-            }
         }
 
         public void Save(string filePath)
         {
-            var options = new JsonSerializerOptions { IncludeFields = true, WriteIndented = true };
-            string json = JsonSerializer.Serialize(this.Layers, options);
-            File.WriteAllText(filePath, json);
-            Console.WriteLine("Váhy byly uloženy.");
+            var options = new JsonSerializerOptions
+            {
+                IncludeFields = true,
+                WriteIndented = true
+            };
+
+            File.WriteAllText(filePath, JsonSerializer.Serialize(Layers, options));
         }
 
         public void Load(string filePath)
         {
-            if (File.Exists(filePath))
+            var options = new JsonSerializerOptions
             {
-                var options = new JsonSerializerOptions { IncludeFields = true };
-                string json = File.ReadAllText(filePath);
-                this.Layers = JsonSerializer.Deserialize<Layer[]>(json, options);
-                Console.WriteLine("Váhy byly načteny.");
+                IncludeFields = true
+            };
+
+            Layer[]? loaded = JsonSerializer.Deserialize<Layer[]>(
+                File.ReadAllText(filePath), options);
+
+            if (loaded == null || loaded.Length != Layers.Length)
+                throw new InvalidDataException("Invalid network file.");
+
+            for (int i = 0; i < loaded.Length; i++)
+            {
+                if (loaded[i].Neurons.Length != Layers[i].Neurons.Length)
+                    throw new InvalidDataException("Network architecture mismatch.");
+
+                for (int j = 0; j < loaded[i].Neurons.Length; j++)
+                {
+                    if (loaded[i].Neurons[j].Weights.Length !=
+                        Layers[i].Neurons[j].Weights.Length)
+                        throw new InvalidDataException("Network input size mismatch.");
+                }
             }
+
+            Layers = loaded;
         }
     }
 }

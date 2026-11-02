@@ -1,174 +1,253 @@
+
 using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
 
-
-class Tokenizer
+public class Tokenizer
 {
-    public Dictionary<int, string> slovnik = new Dictionary<int, string>();//slovník
-    public List<int> TokenizedText = new List<int>();
+    public Dictionary<int, string> slovnik = new();
+    public List<int> TokenizedText = new();
+    public List<MergeRule> MergeRules = new();
 
-    // znak pro mezeru
-    private const string MezeraToken = "Ġ";
-    private const string SouborSlovniku = "slovnik.json";
+    private readonly Dictionary<string, int> tokenToId = new();
 
-    public Tokenizer()
+    private const string MezeraToken = "\u0120";
+    private const string EndToken = "<|end|>";
+
+    public int EndTokenId { get; private set; } = -1;
+
+    public class MergeRule
     {
-        
+        public string Left { get; set; } = "";
+        public string Right { get; set; } = "";
+        public string Result { get; set; } = "";
     }
 
-    void TokenizerStart(string input)
+    private class ModelData
     {
-        Load();
-        string textToTokenize = Console.ReadLine();
-        string upravenyText = textToTokenize.ToLower().Replace(" ", MezeraToken);
-        if (slovnik.Count == 0)
-        {
-            TrainBPE(upravenyText);
-            Save();
-        }
-
-        Tokenize(upravenyText);
-        
-        string rekonstrukce = Detokenize(TokenizedText);
+        public Dictionary<int, string> Vocabulary { get; set; } = new();
+        public List<MergeRule> Merges { get; set; } = new();
     }
-    
-    public void TrainBPE(string textToTokenize) //BPE - trénink
+
+    private int AddToken(string token)
     {
-        foreach (char c in textToTokenize)
+        if (tokenToId.TryGetValue(token, out int existingId))
+            return existingId;
+
+        int id = slovnik.Count == 0 ? 0 : slovnik.Keys.Max() + 1;
+
+        slovnik[id] = token;
+        tokenToId[token] = id;
+
+        return id;
+    }
+
+    private void RebuildTokenIndex()
+    {
+        tokenToId.Clear();
+
+        foreach (var item in slovnik.OrderBy(x => x.Key))
         {
-            string znak = c.ToString();
-            if (!slovnik.ContainsValue(znak))
-            {
-                slovnik.Add(slovnik.Count, znak);
-            }
+            if (!tokenToId.ContainsKey(item.Value))
+                tokenToId[item.Value] = item.Key;
         }
-        
-        while (true)
-        {
-            List<int> aktualniTokeny = SlovnikNaText(textToTokenize);
-            
-            var frekvenceDvojic = new Dictionary<(int, int), int>();
+    }
 
-            for (int i = 0; i < aktualniTokeny.Count - 1; i++)
+    public void EnsureEndToken()
+    {
+        if (tokenToId.TryGetValue(EndToken, out int existingId))
+        {
+            EndTokenId = existingId;
+            return;
+        }
+
+        EndTokenId = AddToken(EndToken);
+        Save();
+    }
+
+    public void TrainBPE(string text, int maxMerges = 500)
+    {
+        slovnik.Clear();
+        TokenizedText.Clear();
+        MergeRules.Clear();
+        tokenToId.Clear();
+        EndTokenId = -1;
+
+        text = Normalize(text);
+
+        foreach (char c in text)
+            AddToken(c.ToString());
+
+        List<string> symbols = text.Select(c => c.ToString()).ToList();
+
+        for (int merge = 0; merge < maxMerges; merge++)
+        {
+            Dictionary<(string Left, string Right), int> pairCounts = new();
+
+            for (int i = 0; i < symbols.Count - 1; i++)
             {
-                var dvojice = (aktualniTokeny[i], aktualniTokeny[i + 1]);
-                if (frekvenceDvojic.ContainsKey(dvojice))
-                    frekvenceDvojic[dvojice]++;
-                else
-                    frekvenceDvojic[dvojice] = 1;
+                var pair = (symbols[i], symbols[i + 1]);
+
+                if (!pairCounts.ContainsKey(pair))
+                    pairCounts[pair] = 0;
+
+                pairCounts[pair]++;
             }
 
-            if (frekvenceDvojic.Count == 0) break;
-            
-            var nejcastejsi = frekvenceDvojic.OrderByDescending(x => x.Value).First();
-            
-            if (nejcastejsi.Value <= 1)
-            {
+            if (pairCounts.Count == 0)
                 break;
-            }
-            
-            string value1 = slovnik[nejcastejsi.Key.Item1];
-            string value2 = slovnik[nejcastejsi.Key.Item2];
-            string novyToken = value1 + value2;
 
-            slovnik.Add(slovnik.Count, novyToken);
-        }
-    }
-    
-    public void Tokenize(string text)
-    {
-        TokenizedText = SlovnikNaText(text);
-    }
-    
-    private List<int> SlovnikNaText(string text)
-    {
-        List<int> vysledek = new List<int>();
-        int i = 0;
-        while (i < text.Length)
-        {
-            string nejdelsiNajdenyToken = "";
-            int idNejdelsiho = -1;
-            
-            foreach (var token in slovnik)
+            var bestPair = pairCounts.OrderByDescending(x => x.Value).First();
+
+            if (bestPair.Value < 2)
+                break;
+
+            string left = bestPair.Key.Left;
+            string right = bestPair.Key.Right;
+            string result = left + right;
+
+            MergeRules.Add(new MergeRule
             {
-                if (text.Substring(i).StartsWith(token.Value))
+                Left = left,
+                Right = right,
+                Result = result
+            });
+
+            AddToken(result);
+
+            List<string> mergedSymbols = new();
+            int index = 0;
+
+            while (index < symbols.Count)
+            {
+                if (index < symbols.Count - 1 &&
+                    symbols[index] == left &&
+                    symbols[index + 1] == right)
                 {
-                    if (token.Value.Length > nejdelsiNajdenyToken.Length)
-                    {
-                        nejdelsiNajdenyToken = token.Value;
-                        idNejdelsiho = token.Key;
-                    }
+                    mergedSymbols.Add(result);
+                    index += 2;
+                }
+                else
+                {
+                    mergedSymbols.Add(symbols[index]);
+                    index++;
                 }
             }
 
-            if (idNejdelsiho != -1)
-            {
-                vysledek.Add(idNejdelsiho);
-                i += nejdelsiNajdenyToken.Length;
-            }
-            else
-            {
-                i++; 
-            }
+            symbols = mergedSymbols;
         }
-        return vysledek;
+
+        RebuildTokenIndex();
+        Save();
     }
-    
-    public string Detokenize(List<int> tokenIds)
+
+    public void Tokenize(string text)
     {
-        string text = "";
-        foreach (var id in tokenIds)
+        TokenizedText.Clear();
+
+        text = Normalize(text);
+
+        List<string> symbols = text.Select(c => c.ToString()).ToList();
+
+        foreach (MergeRule rule in MergeRules)
         {
-            if (slovnik.ContainsKey(id))
+            List<string> mergedSymbols = new();
+            int index = 0;
+
+            while (index < symbols.Count)
             {
-                text += slovnik[id];
+                if (index < symbols.Count - 1 &&
+                    symbols[index] == rule.Left &&
+                    symbols[index + 1] == rule.Right)
+                {
+                    mergedSymbols.Add(rule.Result);
+                    index += 2;
+                }
+                else
+                {
+                    mergedSymbols.Add(symbols[index]);
+                    index++;
+                }
             }
+
+            symbols = mergedSymbols;
         }
+
+        foreach (string symbol in symbols)
+        {
+            if (!tokenToId.TryGetValue(symbol, out int id))
+                throw new InvalidOperationException(
+                    $"Token '{symbol}' není ve slovníku. Přidej ho do trénovacích dat tokenizeru a tokenizer znovu natrénuj.");
+
+            TokenizedText.Add(id);
+        }
+    }
+
+    public string Detokenize(List<int> tokens)
+    {
+        List<string> symbols = new();
+
+        foreach (int id in tokens)
+        {
+            if (id == EndTokenId)
+                break;
+
+            if (slovnik.TryGetValue(id, out string? token))
+                symbols.Add(token);
+        }
+
+        return Denormalize(string.Concat(symbols));
+    }
+
+    private string Normalize(string text)
+    {
+        return text.Replace(" ", MezeraToken);
+    }
+
+    private string Denormalize(string text)
+    {
         return text.Replace(MezeraToken, " ");
     }
 
-    public void VypisSlovnik()
+    public void Save(string filePath = "slovnik.json")
     {
-        foreach (var s in slovnik.OrderBy(x => x.Key))
+        ModelData data = new()
         {
-            Console.WriteLine($"{s.Key}: \"{s.Value}\"");
-        }
+            Vocabulary = slovnik,
+            Merges = MergeRules
+        };
+
+        JsonSerializerOptions options = new()
+        {
+            WriteIndented = true
+        };
+
+        string json = JsonSerializer.Serialize(data, options);
+        File.WriteAllText(filePath, json);
     }
 
-    // ukládání
-    public void Save()
+    public void Load(string filePath = "slovnik.json")
     {
-        try
-        {
-            var options = new JsonSerializerOptions { WriteIndented = true };
-            string jsonString = JsonSerializer.Serialize(slovnik, options);
-            File.WriteAllText(SouborSlovniku, jsonString);
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Chyba při ukládání slovníku: {ex.Message}");
-        }
-    }
+        if (!File.Exists(filePath))
+            throw new FileNotFoundException("Soubor tokenizeru nebyl nalezen.", filePath);
 
-    // načítání
-    public void Load()
-    {
-        if (File.Exists(SouborSlovniku))
-        {
-            try
-            {
-                string jsonString = File.ReadAllText(SouborSlovniku);
-                var sSlovnik = JsonSerializer.Deserialize<Dictionary<string, string>>(jsonString);
-                
-                slovnik = sSlovnik.ToDictionary(x => int.Parse(x.Key), x => x.Value);
-            }
-            catch (Exception ex)
-            {
-                slovnik.Clear();
-            }
-        }
+        string json = File.ReadAllText(filePath);
+
+        ModelData? data = JsonSerializer.Deserialize<ModelData>(json);
+
+        if (data == null)
+            throw new InvalidOperationException("Soubor tokenizeru se nepodařilo načíst.");
+
+        slovnik = data.Vocabulary ?? new Dictionary<int, string>();
+        MergeRules = data.Merges ?? new List<MergeRule>();
+
+        TokenizedText.Clear();
+        RebuildTokenIndex();
+
+        EndTokenId = tokenToId.TryGetValue(EndToken, out int id)
+            ? id
+            : -1;
     }
 }
